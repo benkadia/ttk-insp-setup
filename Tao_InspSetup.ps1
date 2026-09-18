@@ -4,6 +4,7 @@
 #   TAT       : (-DonDep) loại kiểm active nằm ngoài quy tắc nhóm & ngoài $GiuLai -> inactive
 #   KICH_HOAT : (-DonDep) loại kiểm trong quy tắc nhưng đang inactive -> active
 # v3: credential env/DPAPI; không có việc thì thoát, không tạo log; chỉ cài ImportExcel khi cần.
+# v6: PATCH dùng If-Match: * (tránh 412 khi 1 mã có nhiều loại kiểm cần sửa trong cùng lần chạy).
 # v5: Prefer continue-on-error; giữ kết quả từng dòng khi SAP dừng lô giữa chừng.
 # v4: thêm -DonDep (API không cho xóa -> tắt bằng ProdInspTypeSettingIsActive=false).
 # Mặc định DRY-RUN. -ThucHien để ghi. -GioiHan N chạy thử N dòng. -KichThuocLo 1 = gửi lẻ từng dòng.
@@ -93,7 +94,9 @@ function Send-Batch($lo) {
       $body = Get-Body $v.Ma $v.Loai $v.Nhom; $extra = ''
     } else {
       $method = 'PATCH'; $rel = "ProductPlantInspTypeSetting(Product='$($v.Ma)',Plant='$Plant',InspectionLotType='$($v.Loai)')"
-      $extra = "If-Match: $($v.Etag)`r`n"
+      # ETag của inspection setup đổi theo cả mã (sửa 1 loại kiểm -> các loại khác của cùng mã bị stale 412)
+      # nên dùng If-Match: * ; mỗi PATCH chỉ đổi đúng 1 field nên không ghi đè dữ liệu khác
+      $extra = "If-Match: *`r`n"
       $body = switch ($v.HanhDong) {
         'SUA_DM1'   { '{"InspLotDynamicRule":"DM1"}' }
         'TAT'       { '{"ProdInspTypeSettingIsActive":false}' }
