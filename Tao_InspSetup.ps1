@@ -4,6 +4,7 @@
 #   TAT       : (-DonDep) loại kiểm active nằm ngoài quy tắc nhóm & ngoài $GiuLai -> inactive
 #   KICH_HOAT : (-DonDep) loại kiểm trong quy tắc nhưng đang inactive -> active
 # v3: credential env/DPAPI; không có việc thì thoát, không tạo log; chỉ cài ImportExcel khi cần.
+# v5: Prefer continue-on-error; giữ kết quả từng dòng khi SAP dừng lô giữa chừng.
 # v4: thêm -DonDep (API không cho xóa -> tắt bằng ProdInspTypeSettingIsActive=false).
 # Mặc định DRY-RUN. -ThucHien để ghi. -GioiHan N chạy thử N dòng. -KichThuocLo 1 = gửi lẻ từng dòng.
 param(
@@ -108,7 +109,7 @@ function Send-Batch($lo) {
     try {
       $res = Invoke-WebRequest -Uri "$Svc/`$batch" -Method Post -WebSession $script:ss `
                -Body ([Text.Encoding]::UTF8.GetBytes($sb.ToString())) `
-               -Headers @{ Authorization=$auth; 'x-csrf-token'=$script:csrf; Accept='multipart/mixed' } `
+               -Headers @{ Authorization=$auth; 'x-csrf-token'=$script:csrf; Accept='multipart/mixed'; Prefer='odata.continue-on-error' } `
                -ContentType "multipart/mixed; boundary=$bd" -UseBasicParsing
       break
     } catch {
@@ -131,10 +132,12 @@ function Send-Batch($lo) {
     }
     @{ OK=($c -lt 400); Code=$c; Msg=$m }
   }
-  if (@($kq).Count -ne $lo.Count) {
-    return @($lo | ForEach-Object { @{ OK=$false; Code='?'; Msg="Response batch không khớp số dòng ($(@($kq).Count)/$($lo.Count)) - chạy lại để đối chiếu" } })
+  # SAP có thể dừng lô sau dòng lỗi đầu tiên: giữ kết quả các dòng đã trả về, phần còn lại đánh dấu chưa xử lý
+  $kq = @($kq)
+  $ketQua = for ($t = 0; $t -lt $lo.Count; $t++) {
+    if ($t -lt $kq.Count) { $kq[$t] } else { @{ OK=$false; Code='-'; Msg='Chưa xử lý (SAP dừng lô sau dòng lỗi) - lần chạy sau sẽ làm lại' } }
   }
-  return @($kq)
+  return @($ketQua)
 }
 
 # ---- 1. Đối chiếu ----
