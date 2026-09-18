@@ -10,16 +10,13 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Cài ImportExcel
-        shell: powershell
-        run: Install-Module ImportExcel -Scope CurrentUser -Force
       - name: Chạy script
         shell: powershell
         env:
           SAP_USER: ${{ secrets.SAP_USER }}
           SAP_PASS: ${{ secrets.SAP_PASS }}
-        run: .\Tao_InspSetup.ps1 -ThucHien -SuaDM1
-      - name: Lưu log
+        run: .\Tao_InspSetup.ps1 -ThucHien -SuaDM1 -DonDep
+      - name: Lưu log (chỉ khi có việc)
         if: always()
         uses: actions/upload-artifact@v4
         with:
