@@ -1,18 +1,24 @@
-﻿# Tao_InspSetup.ps1 v2 - Tạo loại kiểm còn thiếu theo quy tắc TTK + (tùy chọn) sửa DM1 cho TTK10
-# v2: tắt progress bar, gửi theo lô OData $batch (multipart), mỗi thao tác độc lập
+﻿# Tao_InspSetup.ps1 v4 - Đồng bộ inspection setup Plant 1000 theo quy tắc TTK
+#   TAO       : tạo loại kiểm còn thiếu theo quy tắc
+#   SUA_DM1   : (-SuaDM1) TTK10 chưa có dynamic rule DM1 -> DM1
+#   TAT       : (-DonDep) loại kiểm active nằm ngoài quy tắc nhóm & ngoài $GiuLai -> inactive
+#   KICH_HOAT : (-DonDep) loại kiểm trong quy tắc nhưng đang inactive -> active
+# v3: credential env/DPAPI; không có việc thì thoát, không tạo log; chỉ cài ImportExcel khi cần.
+# v4: thêm -DonDep (API không cho xóa -> tắt bằng ProdInspTypeSettingIsActive=false).
 # Mặc định DRY-RUN. -ThucHien để ghi. -GioiHan N chạy thử N dòng. -KichThuocLo 1 = gửi lẻ từng dòng.
 param(
   [switch]$ThucHien,
   [switch]$SuaDM1,
+  [switch]$DonDep,
   [int]$GioiHan = 0,
   [int]$KichThuocLo = 50
 )
 $ErrorActionPreference = 'Stop'
-$ProgressPreference    = 'SilentlyContinue'   # <-- tăng tốc Invoke-WebRequest trên PS 5.1
+$ProgressPreference    = 'SilentlyContinue'   # tăng tốc Invoke-WebRequest trên PS 5.1
 $BaseUrl  = 'https://my412079-api.s4hana.cloud.sap'
 $Svc      = "$BaseUrl/sap/opu/odata4/sap/api_product/srvd_a2x/sap/product/0003"
 $Plant    = '1000'
-$CredFile = Join-Path $PSScriptRoot 'sap_cred.xml'   # <-- đổi theo tên file của Khoa
+$CredFile = Join-Path $PSScriptRoot 'sap_cred.xml'   # <-- chỉ dùng khi chạy trên máy
 
 $TP = @('TTK04','TTK10','TTK89','TTK89KPH','TTK89TV')
 $QuyTac = [ordered]@{
@@ -25,6 +31,8 @@ $QuyTac = [ordered]@{
   'M051'=@{Tu=51000000;Den=51999999;Loai=$TP}
   'M052'=@{Tu=52000000;Den=52999999;Loai=$TP}
 }
+# Loại kiểm được giữ nguyên dù nằm ngoài quy tắc (không bị -DonDep tắt). Để trống = tắt hết loại ngoài quy tắc.
+$GiuLai = @()
 
 function Get-Body($ma, $loai, $nhom) {
   $b = [ordered]@{
@@ -44,7 +52,7 @@ function Get-Body($ma, $loai, $nhom) {
 # ---- Auth ----
 if ($env:SAP_USER -and $env:SAP_PASS) {            # chạy trên GitHub Actions
   $pair = "{0}:{1}" -f $env:SAP_USER, $env:SAP_PASS
-} else {                                           # chạy trên máy (DPAPI như cũ)
+} else {                                           # chạy trên máy (DPAPI)
   $cred = Import-Clixml $CredFile
   $pair = "{0}:{1}" -f $cred.UserName, $cred.GetNetworkCredential().Password
 }
@@ -84,7 +92,12 @@ function Send-Batch($lo) {
       $body = Get-Body $v.Ma $v.Loai $v.Nhom; $extra = ''
     } else {
       $method = 'PATCH'; $rel = "ProductPlantInspTypeSetting(Product='$($v.Ma)',Plant='$Plant',InspectionLotType='$($v.Loai)')"
-      $body = '{"InspLotDynamicRule":"DM1"}'; $extra = "If-Match: $($v.Etag)`r`n"
+      $extra = "If-Match: $($v.Etag)`r`n"
+      $body = switch ($v.HanhDong) {
+        'SUA_DM1'   { '{"InspLotDynamicRule":"DM1"}' }
+        'TAT'       { '{"ProdInspTypeSettingIsActive":false}' }
+        'KICH_HOAT' { '{"ProdInspTypeSettingIsActive":true}' }
+      }
     }
     [void]$sb.Append("--$bd`r`nContent-Type: application/http`r`nContent-Transfer-Encoding: binary`r`nContent-ID: $n`r`n`r`n")
     [void]$sb.Append("$method $rel HTTP/1.1`r`nContent-Type: application/json`r`nAccept: application/json`r`n$extra`r`n$body`r`n")
@@ -106,7 +119,6 @@ function Send-Batch($lo) {
     }
   }
 
-  # Tách response: mỗi part có dòng "HTTP/1.1 xxx" và (nếu lỗi) JSON error
   $txt = if ($res.Content -is [byte[]]) { [Text.Encoding]::UTF8.GetString($res.Content) } else { $res.Content }
   $rbd = ([regex]::Match($res.Headers['Content-Type'], 'boundary=([^;\s]+)')).Groups[1].Value.Trim('"')
   $parts = $txt -split [regex]::Escape("--$rbd") | Where-Object { $_ -match 'HTTP/1\.1 \d{3}' }
@@ -119,7 +131,7 @@ function Send-Batch($lo) {
     }
     @{ OK=($c -lt 400); Code=$c; Msg=$m }
   }
-  if (@($kq).Count -ne $lo.Count) {   # response lạ -> không đoán, đánh dấu cần kiểm tra
+  if (@($kq).Count -ne $lo.Count) {
     return @($lo | ForEach-Object { @{ OK=$false; Code='?'; Msg="Response batch không khớp số dòng ($(@($kq).Count)/$($lo.Count)) - chạy lại để đối chiếu" } })
   }
   return @($kq)
@@ -135,17 +147,40 @@ $viec = New-Object System.Collections.Generic.List[object]
 foreach ($m in $maPlant) {
   $nhom = NhomCua $m.Product; if (-not $nhom) { continue }
   $hc = if ($idx[$m.Product]) { $idx[$m.Product] } else { @{} }
-  foreach ($l in $QuyTac[$nhom].Loai) {
+  $quyTacNhom = $QuyTac[$nhom].Loai
+  foreach ($l in $quyTacNhom) {
     if (-not $hc.ContainsKey($l)) {
       $viec.Add([pscustomobject]@{ Ma=$m.Product; Nhom=$nhom; Loai=$l; HanhDong='TAO'; Etag='' })
-    } elseif ($SuaDM1 -and $l -eq 'TTK10' -and $hc[$l].InspLotDynamicRule -ne 'DM1') {
-      $viec.Add([pscustomobject]@{ Ma=$m.Product; Nhom=$nhom; Loai=$l; HanhDong='SUA_DM1'; Etag=$hc[$l].'@odata.etag' })
+      continue
+    }
+    $s = $hc[$l]
+    if ($DonDep -and -not $s.ProdInspTypeSettingIsActive) {
+      $viec.Add([pscustomobject]@{ Ma=$m.Product; Nhom=$nhom; Loai=$l; HanhDong='KICH_HOAT'; Etag=$s.'@odata.etag' })
+    }
+    if ($SuaDM1 -and $l -eq 'TTK10' -and $s.InspLotDynamicRule -ne 'DM1') {
+      if ($DonDep -and -not $s.ProdInspTypeSettingIsActive) { continue }   # tránh 2 PATCH cùng dòng/etag; lần chạy sau sẽ sửa DM1
+      $viec.Add([pscustomobject]@{ Ma=$m.Product; Nhom=$nhom; Loai=$l; HanhDong='SUA_DM1'; Etag=$s.'@odata.etag' })
+    }
+  }
+  if ($DonDep) {
+    foreach ($l in $hc.Keys) {
+      $s = $hc[$l]
+      if ($s.ProdInspTypeSettingIsActive -and ($l -notin $quyTacNhom) -and ($l -notin $GiuLai)) {
+        $viec.Add([pscustomobject]@{ Ma=$m.Product; Nhom=$nhom; Loai=$l; HanhDong='TAT'; Etag=$s.'@odata.etag' })
+      }
     }
   }
 }
 if ($GioiHan -gt 0) { $viec = @($viec | Select-Object -First $GioiHan) } else { $viec = $viec.ToArray() }
-Write-Host ("Việc cần làm: {0} (TẠO: {1}, SỬA DM1: {2}) | Lô: {3}" -f $viec.Count,
-  @($viec | ? HanhDong -eq 'TAO').Count, @($viec | ? HanhDong -eq 'SUA_DM1').Count, $KichThuocLo) -ForegroundColor Cyan
+Write-Host ("Việc cần làm: {0} (TẠO: {1}, SỬA DM1: {2}, TẮT: {3}, KÍCH HOẠT: {4}) | Lô: {5}" -f $viec.Count,
+  @($viec | ? HanhDong -eq 'TAO').Count, @($viec | ? HanhDong -eq 'SUA_DM1').Count,
+  @($viec | ? HanhDong -eq 'TAT').Count, @($viec | ? HanhDong -eq 'KICH_HOAT').Count, $KichThuocLo) -ForegroundColor Cyan
+
+if ($viec.Count -eq 0) { Write-Host 'Không có việc - thoát, không tạo log.' -ForegroundColor Green; return }
+if (-not (Get-Module -ListAvailable ImportExcel)) {
+  Write-Host 'Cài module ImportExcel...'
+  Install-Module ImportExcel -Scope CurrentUser -Force
+}
 
 # ---- 2. Thực hiện ----
 $log = New-Object System.Collections.Generic.List[object]
@@ -162,13 +197,19 @@ for ($i = 0; $i -lt $viec.Count; $i += $KichThuocLo) {
       'HTTP'="$($kq.Code)"; 'Thông báo'=$kq.Msg })
   }
   $loi = @($kqLo | ? { $_.OK -eq $false }).Count
-  Write-Host ("Lô {0}-{1}/{2}: OK {3}, LỖI {4} | {5:n0}s" -f ($i+1), ($i+$lo.Count), $viec.Count,
-    ($lo.Count - $loi), $loi, $sw.Elapsed.TotalSeconds) -ForegroundColor $(if ($loi) { 'Yellow' } else { 'Green' })
+  if ($ThucHien) {
+    Write-Host ("Lô {0}-{1}/{2}: OK {3}, LỖI {4} | {5:n0}s" -f ($i+1), ($i+$lo.Count), $viec.Count,
+      ($lo.Count - $loi), $loi, $sw.Elapsed.TotalSeconds) -ForegroundColor $(if ($loi) { 'Yellow' } else { 'Green' })
+  } else {
+    Write-Host ("Lô {0}-{1}/{2}: DRY-RUN (chưa ghi)" -f ($i+1), ($i+$lo.Count), $viec.Count) -ForegroundColor Gray
+  }
 }
 
 # ---- 3. Log ----
 $tag = if ($ThucHien) { 'ThucHien' } else { 'DryRun' }
 $out = Join-Path $PSScriptRoot ("Log_TaoInspSetup_{0}_{1}.xlsx" -f $tag, (Get-Date -Format 'yyyy-MM-dd_HHmm'))
 $log | Export-Excel -Path $out -WorksheetName 'Log' -TableStyle Medium9 -AutoSize -FreezeTopRow -NoNumberConversion '*'
+$soLoi = @($log | ? 'Kết quả' -eq 'LỖI').Count
 Write-Host ("Xong: {0} | OK: {1} | LỖI: {2} | Tổng thời gian: {3:n0}s" -f $out,
-  @($log | ? 'Kết quả' -eq 'OK').Count, @($log | ? 'Kết quả' -eq 'LỖI').Count, $sw.Elapsed.TotalSeconds)
+  @($log | ? 'Kết quả' -eq 'OK').Count, $soLoi, $sw.Elapsed.TotalSeconds)
+if ($soLoi -gt 0) { exit 1 }   # báo đỏ trên GitHub Actions để nhận email khi có dòng lỗi
