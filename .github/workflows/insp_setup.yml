@@ -7,20 +7,57 @@ on:
 jobs:
   run:
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - name: Chạy script
+
+      - name: Cài ImportExcel
+        shell: powershell
+        run: Install-Module ImportExcel -Scope CurrentUser -Force
+
+      # 1. Gán inspection setup (như cũ)
+      - name: Gán inspection setup
         shell: powershell
         env:
           SAP_USER: ${{ secrets.SAP_USER }}
           SAP_PASS: ${{ secrets.SAP_PASS }}
-        run: .\Tao_InspSetup.ps1 -ThucHien -SuaDM1 -DonDep
-      - name: Lưu log (chỉ khi có việc)
+        run: .\Tao_InspSetup.ps1 -ThucHien -SuaDM1
+
+      # 2. Khôi phục ảnh chụp YY1 của lần chạy trước (cache, không commit vào repo)
+      - name: Khôi phục ảnh chụp YY1
+        if: ${{ !cancelled() }}
+        uses: actions/cache/restore@v4
+        with:
+          path: yy1_anh_chup.json
+          key: yy1-anh-chup-${{ github.run_id }}
+          restore-keys: yy1-anh-chup-
+
+      # 3. Tạo inspection plan cho mã mới + đồng bộ dung sai khi YY1 đổi
+      #    Chạy cả khi bước 1 lỗi: mã đã có loại kiểm từ trước vẫn cần plan.
+      - name: Tạo inspection plan
+        if: ${{ !cancelled() }}
+        shell: powershell
+        env:
+          SAP_USER: ${{ secrets.SAP_USER }}
+          SAP_PASS: ${{ secrets.SAP_PASS }}
+        run: .\Tao_InspPlan.ps1 -ThucHien -DongBo
+
+      # 4. Lưu ảnh chụp mới cho lần sau (kể cả khi có lỗi ở bước khác)
+      - name: Lưu ảnh chụp YY1
+        if: ${{ always() && hashFiles('yy1_anh_chup.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: yy1_anh_chup.json
+          key: yy1-anh-chup-${{ github.run_id }}
+
+      - name: Lưu log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: log-${{ github.run_id }}
-          path: Log_TaoInspSetup_*.xlsx
+          path: |
+            Log_TaoInspSetup_*.xlsx
+            Log_TaoInspPlan_*.xlsx
+            KeHoach_InspPlan_*.xlsx
           if-no-files-found: ignore
           retention-days: 90
