@@ -131,6 +131,11 @@ $gr=@{}; $bu=@{}; foreach($p in $prd){ $gr[(N $p.Product)]=$p.ProductGroup; $bu[
 
 
 $dsc=@{}; foreach($d in $desc){ if(-not $dsc[(N $d.Product)]){$dsc[(N $d.Product)]=$d.ProductDescription} }
+# Danh sach loai tru: ma_bo_qua.txt (moi dong 1 ma, # la ghi chu) -> ma loi master data, ma test...
+$loaiTru=@{}
+$fLT=Join-Path $PSScriptRoot 'ma_bo_qua.txt'
+if (Test-Path $fLT) { Get-Content $fLT -Encoding UTF8 | % { ($_ -split '#')[0].Trim() } | ? { $_ } | % { $loaiTru[(N $_)]=$true }
+                      if ($loaiTru.Count) { Buoc ("Loai tru {0} ma theo ma_bo_qua.txt" -f $loaiTru.Count) } }
 $song=@{}; foreach($z in $pp){ if(-not $z.IsMarkedForDeletion){$song[(N $z.Product)]=$true} }
 $coLoai=@{}; foreach($s in $setup){ if($s.ProdInspTypeSettingIsActive){$coLoai[(N $s.Product)]=$true} }
 $planOK=@{}; foreach($h in $hdrRaw){ if(-not($h.IsDeleted -or $h.IsMarkedForDeletion)){ $planOK["$($h.InspectionPlanGroup)|$($h.InspectionPlan)"]=$h } }
@@ -248,7 +253,7 @@ $boQua=New-Object System.Collections.Generic.List[object]
 $canDoc=New-Object System.Collections.Generic.List[string]
 foreach($m0 in $coLoai.Keys){
   $m=N $m0
-  if (-not $song[$m]) { continue }
+  if (-not $song[$m] -or $loaiTru[$m]) { continue }
   $nh=NhomCua $m; if (-not $nh) { continue }
   if ($ChiNhom -and $nh -ne $ChiNhom) { continue }
   if ($ChiMa -and $m -ne $ChiMa.TrimStart('0')) { continue }
@@ -260,7 +265,7 @@ Buoc ("Da doc YY1: {0} ma" -f $yy.Count)
 
 foreach($ma in ($coLoai.Keys | Sort-Object)) {
   $ma=N $ma
-  if (-not $song[$ma]) { continue }
+  if (-not $song[$ma] -or $loaiTru[$ma]) { continue }
   $nhom=NhomCua $ma; if (-not $nhom) { continue }
   if ($ChiNhom -and $nhom -ne $ChiNhom) { continue }
   if ($ChiMa -and $ma.TrimStart('0') -ne $ChiMa.TrimStart('0')) { continue }
@@ -373,7 +378,7 @@ try {
 
 # Bang tra plan theo group, dung lai du lieu da doc 1 lan o dau script
 $planTheoGroup=@{}
-foreach($h in $hdrRaw){ if($h.IsDeleted){continue}
+foreach($h in $hdrRaw){
   $k="$($h.InspectionPlanGroup)"
   if(-not $planTheoGroup[$k]){ $planTheoGroup[$k]=New-Object System.Collections.Generic.List[object] }
   $planTheoGroup[$k].Add($h) }
@@ -450,9 +455,17 @@ foreach($v in $viec){
   Write-Host ("[{0}/{1}] {2} usage {3} ({4} chỉ tiêu)" -f $i,$viec.Count,$v.Ma,$v.Usage,$v.CT.Count)
   # 1. header
   $exist=@(if($planTheoGroup[$grp]){$planTheoGroup[$grp]})
-  $sameUsage=@($exist | ? { $_.BillOfOperationsUsage -eq $v.Usage -and -not $_.IsDeleted })
+  # Moi plan co the co nhieu phien ban noi bo (xoa trong app = them phien ban moi mang co xoa)
+  # -> chi xet PHIEN BAN MOI NHAT cua tung plan
+  $moiNhat=@($exist | Group-Object InspectionPlan | % {
+    $_.Group | Sort-Object @{Expression={[int]("0"+$_.InspectionPlanInternalVersion)}} -Descending | Select-Object -First 1 })
+  $sameUsage=@($moiNhat | ? { $_.BillOfOperationsUsage -eq $v.Usage -and -not $_.IsDeleted -and -not $_.IsMarkedForDeletion })
   if ($sameUsage.Count) {
     $planNo=$sameUsage[0].InspectionPlan; $planVer=$sameUsage[0].InspectionPlanInternalVersion
+    # Don vi plan phai trung don vi co so vat tu, neu khong gan vat tu se loi CP/284 mai mai
+    if ("$($sameUsage[0].BillOfOperationsUnit)" -and "$($sameUsage[0].BillOfOperationsUnit)" -ne "$($v.Unit)") {
+      $log.Add([pscustomobject]@{Ma=$v.Ma;Usage=$v.Usage;Ms=0;Buoc='Header';KQ='LOI'
+        Msg="plan $planNo dung don vi $($sameUsage[0].BillOfOperationsUnit) nhung don vi co so vat tu la $($v.Unit) -> xoa plan $planNo de script tao lai"}); continue }
     # Plan da release -> khong sua, de QA tu quyet dinh (tranh doi noi dung dang dung)
     if ("$($sameUsage[0].BillOfOperationsStatus)" -eq '4') {
       $log.Add([pscustomobject]@{Ma=$v.Ma;Usage=$v.Usage;Ms=$script:msCuoi;Buoc='Bo qua';KQ='OK'
@@ -595,7 +608,7 @@ if ($DongBo) {
       foreach($t in $truong){ if ((ChuanYY $c.$t) -ne $hienTai[$m][$t]) {
         if(-not $doi[$m]){ $doi[$m]=New-Object System.Collections.Generic.List[string] }
         $doi[$m].Add($t) } } }
-    $dsDoi=@($doi.Keys | ? { $coPlan["$_|5"] -or $coPlan["$_|6"] })
+    $dsDoi=@($doi.Keys | ? { ($coPlan["$_|5"] -or $coPlan["$_|6"]) -and -not $loaiTru[$_] })
     if ($ChiNhom) { $dsDoi=@($dsDoi | ? { (NhomCua $_) -eq $ChiNhom }) }
     Buoc ("Dong bo: {0} ma doi YY1, trong do {1} ma co plan" -f $doi.Count, $dsDoi.Count)
     foreach($ma in $dsDoi){
